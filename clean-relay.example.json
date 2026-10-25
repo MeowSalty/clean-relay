@@ -1,0 +1,18 @@
+{
+  "listen": "127.0.0.1:17880",
+  "upstream_origin": "https://upstream.example",
+  "drop_input_fields": [
+    "internal_chat_message_metadata_passthrough"
+  ],
+  "max_body_bytes": 33554432,
+  "max_in_flight": 8,
+  "response_header_timeout": "5m",
+  "log_level": "info",
+  "azure_resource_retry": {
+    "enabled": false,
+    "cleanup_mode": "portable_ids",
+    "inspect_sse": true,
+    "max_inspect_bytes": 65536,
+    "inspect_timeout": "2s"
+  }
+}
