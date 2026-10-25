@@ -1,0 +1,68 @@
+{
+  "model": "example-model",
+  "stream": true,
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "列出目录。文本中的 internal_chat_message_metadata_passthrough 应保留。"
+        }
+      ],
+      "fixture_extension": {
+        "internal_chat_message_metadata_passthrough": { "keep": true }
+      }
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [{ "type": "output_text", "text": "我先查看目录。" }],
+      "internal_chat_message_metadata_passthrough": { "fixture_id": "m1" }
+    },
+    {
+      "type": "function_call",
+      "call_id": "call_fixture_1",
+      "name": "list_directory",
+      "arguments": "{\"path\":\".\",\"literal\":\"internal_chat_message_metadata_passthrough\"}",
+      "internal_chat_message_metadata_passthrough": { "fixture_id": "m2" }
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_fixture_1",
+      "output": "[\"README.md\",\"docs\"]",
+      "internal_chat_message_metadata_passthrough": { "fixture_id": "m3" }
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [{ "type": "output_text", "text": "目录中有 README.md 和 docs。" }],
+      "internal_chat_message_metadata_passthrough": null
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [{ "type": "input_text", "text": "读取 README.md。" }],
+      "internal_chat_message_metadata_passthrough": { "fixture_id": "m5" }
+    },
+    {
+      "type": "function_call",
+      "call_id": "call_fixture_2",
+      "name": "read_file",
+      "arguments": "{\"path\":\"README.md\"}",
+      "internal_chat_message_metadata_passthrough": { "fixture_id": "m6" }
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_fixture_2",
+      "output": "This is synthetic fixture content.",
+      "internal_chat_message_metadata_passthrough": { "fixture_id": "m7" }
+    }
+  ],
+  "fixture_large_integer": 9007199254740993,
+  "fixture_decimal": 0.123456789012345678901,
+  "fixture_extension": {
+    "internal_chat_message_metadata_passthrough": { "keep": true }
+  }
+}
