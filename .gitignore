@@ -27,3 +27,11 @@ go.work
 # End of https://www.toptal.com/developers/gitignore/api/go
 
 /dist
+
+# AI assistant / local development notes
+/AGENTS.md
+
+# Local design & implementation notes, kept out of the release
+/design
+
+gitignore
