@@ -44,7 +44,7 @@ flowchart LR
 
 ## 清理规则
 
-清理只做一件事：遍历请求体顶层 `input` 数组，删除每个对象的直接属性 `internal_chat_message_metadata_passthrough`（字段列表由 `drop_input_fields` 配置）。数组长度与顺序、消息正文、工具调用、数字精度和其余字段保持不变；正文中出现同名字符串不会被删除，其他层级的同名字段不受影响。把 `drop_input_fields` 设为 `[]` 可关闭删除，仅保留 JSON 校验和大小限制。
+基础清理遍历请求体顶层 `input` 数组，删除每个对象的直接属性 `internal_chat_message_metadata_passthrough`（字段列表由 `drop_input_fields` 配置）。数组长度与顺序、消息正文、工具调用、数字精度和其余字段保持不变；正文中出现同名字符串不会被删除，其他层级的同名字段不受影响。把 `drop_input_fields` 设为 `[]` 可关闭删除，仅保留 JSON 校验和大小限制。
 
 清理对所有经过代理的 JSON 请求生效，不按上游最终选择的渠道区分——渠道是上游收到清理后的请求才决定的。修改配置后重启生效。
 
@@ -59,6 +59,14 @@ flowchart LR
 | `portable_ids_then_reasoning` | 先清理 ID；再次精确命中且尚未输出时，再删除 reasoning | 3 次 |
 
 逐级模式会跳过无变化的级别；所有副本都保留 compaction 和其他引用，删除 reasoning 属于有损降级。修改 `enabled` 或 `cleanup_mode` 后重启生效。
+
+### 会话范围修复
+
+`history_scope` 默认是 `request`，保持每次请求独立修复。显式选择 `session` 并配置经过验证的 `session_header` 后，首次资源错误会冻结该请求中的候选项；后续首发只对匹配的旧项重放已发送的清理动作，新生成的消息和 reasoning 保留。三个清理挡位均支持这一范围；目标 Azure 渠道可选 `portable_ids_and_reasoning`。
+
+会话头由接入方提供，程序没有内置已验证的 Codex 桌面头名。可先开启 `session_diagnostics`，通过允许列表中头的存在性与短 HMAC 验证同一聊天跨轮稳定、不同聊天独立、压缩前后可关联。缺少有效身份时记录 `session_identity_unavailable`，仅执行基础清理和转发。
+
+缓存只保存不可逆指纹、动作和计数，默认空闲 2 小时过期、最多 256 个会话、每会话 4096 个选择器及锚点、总预算 64 MiB。重启、过期或整组淘汰后会重新建立故障边界。完成判定要求明确的 JSON/SSE 完成状态，HTTP 200 或 EOF 不足以确认恢复；通知压缩和自动压缩仍属后续路线。配置示例、匹配限制和日志解释见 [会话接入说明](docs/windows-usage.md#会话范围修复路线一)。
 
 ## 范围与限制
 
@@ -84,4 +92,4 @@ go vet ./...
 go test -race ./...   # Windows 需要 C 工具链
 ```
 
-测试全部使用本地假上游，覆盖 JSON/gzip、数字精度与重复键、SSE 分段、取消、并发、超时以及条件修复的触发与限制；Windows 退出行为需在 Windows 上验证。行为变更请补充对应的回归测试。
+测试全部使用本地假上游，覆盖 JSON/gzip、数字精度与重复键、SSE 分段、取消、并发、超时，以及会话范围、代次、内存淘汰和完成观察；Windows 退出行为需在 Windows 上验证。桌面会话头与真实渠道切换已做人工接入验收。行为变更请补充对应的回归测试。

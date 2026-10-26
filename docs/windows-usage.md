@@ -1,6 +1,6 @@
 # CleanRelay Windows 启动与接入
 
-CleanRelay 是本机 HTTP/SSE 请求清理代理，可选支持条件资源修复与逐级修复。
+CleanRelay 是本机 HTTP/SSE 请求清理代理，可选支持条件资源修复、逐级修复和会话范围修复。
 
 运行环境为 Windows 10 amd64；运行 exe 不需要安装 Go。交付目录包含 `clean-relay.exe`、`clean-relay.example.json`、本说明和 exe 的 SHA256 校验文件。
 
@@ -26,6 +26,14 @@ Copy-Item .\clean-relay.example.json .\clean-relay.json
   "azure_resource_retry": {
     "enabled": false,
     "cleanup_mode": "portable_ids",
+    "history_scope": "request",
+    "session_diagnostics": false,
+    "session_cache": {
+      "idle_ttl": "2h",
+      "max_sessions": 256,
+      "max_items_per_session": 4096,
+      "max_bytes": 67108864
+    },
     "inspect_sse": true,
     "max_inspect_bytes": 65536,
     "inspect_timeout": "2s"
@@ -66,7 +74,7 @@ Invoke-RestMethod http://127.0.0.1:17880/_cleanrelay/healthz
 
 将 `azure_resource_retry.enabled` 改为 `true` 并重启即可启用；改回 `false` 并重启即可回退，无需修改客户端 Base URL。缺省该对象也默认关闭。
 
-首次请求完成原有元数据清理后正常发送。只有 `POST .../responses` 或 `POST .../responses/compact` 命中精确的 Azure 历史 item 资源归属错误，且尚未向客户端输出，才按选定模式生成修复副本并顺序重发。每一级都要独立匹配错误，每个新请求重新判断。认证、限流、普通 400、网络错误和响应头超时不触发此功能。
+默认 `history_scope=request`：首次请求完成原有元数据清理后正常发送。只有 `POST .../responses` 或 `POST .../responses/compact` 命中精确的 Azure 历史 item 资源归属错误，且尚未向客户端输出，才按选定模式生成修复副本并顺序重发。每一级都要独立匹配错误，每个新请求重新判断。认证、限流、普通 400、网络错误和响应头超时不触发此功能。
 
 | 选项 | 默认值与作用 |
 | --- | --- |
@@ -96,6 +104,91 @@ compaction、旧响应引用、`call_id` 和嵌套资源 ID 保留。旧 `drop_i
 候选请求的响应头和早期心跳可能延后最多配置的检查时间；首个文本、工具或其他输出事件会立即放行。超时后继续转发同一条流，不取消上游。逐级模式最多有两个独立检查窗口，默认检查预算合计最多 4 秒；命中后还需等待变换和后续调用，这不是整个请求的完成上限。每次调用独立沿用 `response_header_timeout`，共用客户端原 deadline，不为长流增加固定总时限。第二次一旦输出或结束检查，就不会再升级。
 
 该功能无法控制上游最终选择的 Azure 资源，也不保证清理 ID 后密文或其他引用可跨资源使用。代理只匹配已知的精确错误形态，不提供通用规则引擎。
+
+## 会话范围修复
+
+`history_scope=session` 会记住一次资源错误对应请求中的候选项。后续请求先完成元数据清理，再仅对精确匹配的旧项重放已采用的动作；这次错误之后新生成的消息和 reasoning 保留。客户端保存的历史不被改写。
+
+### 验证会话标识
+
+程序没有默认会话头名。`session_id`、`conversation_id` 等是诊断候选，不代表所有 Codex 版本都提供稳定的会话协议。
+
+1. 保持 `history_scope=request`，设置 `session_diagnostics=true`；可把准备验证的头名填入 `session_header`。诊断在 `enabled=false` 时也可单独使用。
+2. 重启后，在同一聊天发送多轮请求，再使用另一个聊天并检查日志中的短 HMAC；同一聊天应稳定，不同聊天应不同。手动压缩前后也需能关联。
+3. 确认后，设置 `history_scope=session`、`enabled=true`，并将 `session_header` 固定为已验证的头名，再重启。
+
+诊断仅允许 `session_id`、`conversation_id`、`x-cleanrelay-session-id` 和显式配置的头，记录是否存在、是否合法和 16 个十六进制字符的 HMAC，不输出原始值或凭据。短 HMAC 只用于本进程内比对，重启后会变化；诊断不会自动宣布某个头已可信。
+
+头名必须为不超过 128 字节的 HTTP token，不能选认证头、User-Agent、请求 ID 或已知安装/回合标识头。运行时会话值要求单一、非空、不超过 1024 字节的可见 ASCII，不含空白或逗号。缺失、重复、无效值，以及多值凭据或非法模型，都会记录 `session_identity_unavailable` 并仅执行基础清理和转发，不自动回退到逐请求范围修复。
+
+### 配置示例与预算
+
+下面是可替换现有 `azure_resource_retry` 对象的示例。`X-CleanRelay-Session-ID` 是客户端集成示例：客户端需要为每个逻辑会话发送稳定且独立的值；使用桌面版已有头时，应替换为实测验证后的名称。
+
+```json
+{
+  "enabled": true,
+  "cleanup_mode": "portable_ids_and_reasoning",
+  "history_scope": "session",
+  "session_header": "X-CleanRelay-Session-ID",
+  "session_diagnostics": false,
+  "session_cache": {
+    "idle_ttl": "2h",
+    "max_sessions": 256,
+    "max_items_per_session": 4096,
+    "max_bytes": 67108864
+  },
+  "inspect_sse": true,
+  "max_inspect_bytes": 65536,
+  "inspect_timeout": "2s"
+}
+```
+
+| 选项 | 默认值与约束 |
+| --- | --- |
+| `history_scope` | `request`；只接受 `request` 或 `session` |
+| `session_header` | 无默认值；`session` 模式必须显式提供 |
+| `session_diagnostics` | `false`；布尔值，可独立启用 |
+| `session_cache.idle_ttl` | `2h`；正 Go 时长，匹配旧项刷新空闲时间 |
+| `session_cache.max_sessions` | `256`；正整数，会话按凭据身份隔离 |
+| `session_cache.max_items_per_session` | `4096`；正整数，合计各路径、模型、代次的选择器及锚点 |
+| `session_cache.max_bytes` | `67108864`；正整数，缓存结构采用保守字节计费 |
+
+超限按会话整组淘汰最久未使用的记录，单个超大组不部分保留。该预算限制持久于请求之间的缓存；正在转发的请求及完成观察缓冲另受请求大小、并发数和观察上限约束。重启、过期或淘汰会丢失旧边界；下一次精确资源错误以当时的请求重新建立边界，保护新增项的保证仅在原记录有效期间成立。
+
+未知键、重复键、`null`、非法类型和预算越界继续严格拒绝，即使 `enabled=false` 也会校验。回到逐请求范围时设置 `history_scope=request`；回退到不支持会话配置的旧 exe 前，需移除以上新增字段。
+
+### 匹配与恢复状态
+
+会话范围按客户端凭据、会话头、上游 origin、路径前缀、模型和查询串隔离；同一路径前缀的 `/responses` 与 `/responses/compact` 共用范围。不同会话之间不共享边界，分支若采用不同会话标识也独立处理。
+
+带 ID 的项需要类型、ID 及内容指纹一致；无 ID 的 reasoning 可使用密文指纹。匿名 reasoning 仅在双侧唯一锚点、区间内容及出现次数一致时跨请求匹配。无法对齐的匿名项保留并记录 `scope_alignment_unavailable`，不会退回删除全部 reasoning。编辑、裁剪或重复插入可能让旧项无法匹配；手动压缩后的新窗口若不再含旧选择器，自然不产生清理，回退后重新出现的可识别旧项仍会匹配。
+
+三个挡位仅作用于选中范围。逐级模式记住实际发送过的升级动作；每个入站请求的上游调用上限仍为两次或三次。空数组、无变化副本、幂等键、流恢复、后台请求、取消和输出后的重试边界同样适用于会话模式的首发预处理。
+
+边界冻结、动作发送和恢复完成分别记录。动作只有在传输层确认请求写入成功后才进入缓存；连接失败或发送前取消不能算作已应用。强修复的真实错误继续返回，后续同类错误不会把新历史不断加入同一旧范围。
+
+完成观察只查看原样转发的字节，不额外读流或等待完整长流。JSON 要求完整文档、`status=completed`、数组形态的 `output`、无错误和未完成信息；若提供 `object`，必须为 `response`。SSE 要求一致的 `response.completed` 事件及嵌套完成状态。单个 JSON 文档或 SSE 事件上限为 1 MiB，SSE 总长度不受该上限限制。`inspect_sse` 仅控制早期错误检查，完成观察独立进行。
+
+HTTP 200、`[DONE]` 或 EOF 单独都不构成成功证据。失败、超限、压缩响应、不支持的格式、取消、断流或客户端写入失败保持 `unknown`，转发字节不变。仅当上一代已明确完成，之后的请求再次命中精确资源错误且具有新候选时，才建立下一代；旧的并发响应不能确认新代次。
+
+### 会话日志
+
+结束日志增加以下字段，原有元数据与重试计数保留：
+
+| 字段 | 含义 |
+| --- | --- |
+| `history_scope` | 会话模式为 `session` |
+| `scope_cache` | `miss`、`hit`、`scope_created`、`scope_reused`、`scope_extended`、`scope_cache_budget` 或 `scope_changed` |
+| `scope_generation` / `scope_revision` | 本次涉及的故障代次及版本，不含资源 ID |
+| `scope_pre_removed_item_ids` / `scope_pre_removed_reasoning_items` | 本次首发预处理的实际删除数 |
+| `scope_applied_selectors` | 所观察缓存版本中已应用的选择器数量，非本次删除数 |
+| `scope_write_confirmed` | 最后一次带恢复范围的上游请求是否收到成功写入回调 |
+| `scope_alignment` | 无法安全对齐匿名项时为 `scope_alignment_unavailable` |
+| `recovery_observation` | 本次响应的完成观察结果，如 `completed`、`business_failure`、`completion_limit` |
+| `recovery_acceptance` | 仅正常转发结束且成功确认对应缓存版本时为 `completed`，其他为 `unknown` |
+
+`scope_created` 只表示冻结了边界；`scope_write_confirmed=true` 只表示请求已写出，均不等于业务恢复。过时响应即使观察到完成事件，也不能把 `recovery_acceptance` 记为完成。通知压缩、自动压缩和 `recovery_action` 配置尚未实现。
 
 ## 观察与停止
 

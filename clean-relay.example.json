@@ -11,6 +11,14 @@
   "azure_resource_retry": {
     "enabled": false,
     "cleanup_mode": "portable_ids",
+    "history_scope": "request",
+    "session_diagnostics": false,
+    "session_cache": {
+      "idle_ttl": "2h",
+      "max_sessions": 256,
+      "max_items_per_session": 4096,
+      "max_bytes": 67108864
+    },
     "inspect_sse": true,
     "max_inspect_bytes": 65536,
     "inspect_timeout": "2s"
