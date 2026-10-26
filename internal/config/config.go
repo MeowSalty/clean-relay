@@ -71,6 +71,8 @@ func Parse(data []byte) (_ Config, err error) {
 		AzureResourceRetry: AzureResourceRetryConfig{
 			CleanupMode: "portable_ids", InspectSSE: true,
 			MaxInspectBytes: 65536, InspectTimeout: 2 * time.Second,
+			HistoryScope: "request",
+			SessionCache: defaultSessionCache(),
 		},
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))

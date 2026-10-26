@@ -66,6 +66,7 @@ func TestParseDefaults(t *testing.T) {
 		LogLevel:              slog.LevelInfo,
 		AzureResourceRetry: config.AzureResourceRetryConfig{
 			CleanupMode: "portable_ids", InspectSSE: true, MaxInspectBytes: 65536, InspectTimeout: 2 * time.Second,
+			HistoryScope: "request", SessionCache: expectedSessionCache(),
 		},
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -99,6 +100,7 @@ func TestParseOverrides(t *testing.T) {
 		LogLevel:              slog.LevelDebug,
 		AzureResourceRetry: config.AzureResourceRetryConfig{
 			CleanupMode: "portable_ids", InspectSSE: true, MaxInspectBytes: 65536, InspectTimeout: 2 * time.Second,
+			HistoryScope: "request", SessionCache: expectedSessionCache(),
 		},
 	}
 	if !reflect.DeepEqual(cfg, want) {

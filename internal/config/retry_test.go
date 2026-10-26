@@ -12,6 +12,7 @@ import (
 func TestRetryConfiguration(t *testing.T) {
 	defaults := config.AzureResourceRetryConfig{
 		CleanupMode: "portable_ids", InspectSSE: true, MaxInspectBytes: 65536, InspectTimeout: 2 * time.Second,
+		HistoryScope: "request", SessionCache: expectedSessionCache(),
 	}
 	for _, raw := range []string{`{}`, `{"enabled":false}`} {
 		cfg, err := config.Parse(withField("azure_resource_retry", raw))
@@ -20,7 +21,8 @@ func TestRetryConfiguration(t *testing.T) {
 		}
 	}
 	cfg, err := config.Parse(withField("azure_resource_retry", `{"enabled":true,"cleanup_mode":"portable_ids_and_reasoning","inspect_sse":false,"max_inspect_bytes":1048576,"inspect_timeout":"10s"}`))
-	want := config.AzureResourceRetryConfig{Enabled: true, CleanupMode: "portable_ids_and_reasoning", MaxInspectBytes: 1 << 20, InspectTimeout: 10 * time.Second}
+	want := config.AzureResourceRetryConfig{Enabled: true, CleanupMode: "portable_ids_and_reasoning", MaxInspectBytes: 1 << 20, InspectTimeout: 10 * time.Second,
+		HistoryScope: "request", SessionCache: expectedSessionCache()}
 	if err != nil || cfg.AzureResourceRetry != want {
 		t.Fatalf("overrides = %+v, %v", cfg.AzureResourceRetry, err)
 	}

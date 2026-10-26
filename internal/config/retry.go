@@ -11,11 +11,15 @@ import (
 // AzureResourceRetryConfig controls bounded, opt-in history repair attempts.
 // Its limits bound response inspection, not the lifetime of a response stream.
 type AzureResourceRetryConfig struct {
-	Enabled         bool
-	CleanupMode     string
-	InspectSSE      bool
-	MaxInspectBytes int64
-	InspectTimeout  time.Duration
+	Enabled            bool
+	CleanupMode        string
+	InspectSSE         bool
+	MaxInspectBytes    int64
+	InspectTimeout     time.Duration
+	HistoryScope       string
+	SessionHeader      string
+	SessionDiagnostics bool
+	SessionCache       SessionCacheConfig
 }
 
 func setRetryConfig(cfg *AzureResourceRetryConfig, raw json.RawMessage) error {
@@ -34,7 +38,8 @@ func setRetryConfig(cfg *AzureResourceRetryConfig, raw json.RawMessage) error {
 			return fmt.Errorf("keys must be strings")
 		}
 		switch key {
-		case "enabled", "cleanup_mode", "inspect_sse", "max_inspect_bytes", "inspect_timeout":
+		case "enabled", "cleanup_mode", "inspect_sse", "max_inspect_bytes", "inspect_timeout",
+			"history_scope", "session_header", "session_diagnostics", "session_cache":
 		default:
 			return fmt.Errorf("unknown configuration key; field names are case-sensitive")
 		}
@@ -59,21 +64,46 @@ func setRetryConfig(cfg *AzureResourceRetryConfig, raw json.RawMessage) error {
 	if _, err := dec.Token(); err != io.EOF {
 		return fmt.Errorf("must contain exactly one JSON object")
 	}
+	if cfg.HistoryScope == "session" && cfg.SessionHeader == "" {
+		return fmt.Errorf("session_header: required when history_scope is session")
+	}
 	return nil
 }
 
 func setRetryField(cfg *AzureResourceRetryConfig, key string, raw json.RawMessage) error {
 	switch key {
-	case "enabled", "inspect_sse":
+	case "enabled", "inspect_sse", "session_diagnostics":
 		var value bool
 		if err := json.Unmarshal(raw, &value); err != nil {
 			return fmt.Errorf("must be a boolean")
 		}
 		if key == "enabled" {
 			cfg.Enabled = value
-		} else {
+		} else if key == "inspect_sse" {
 			cfg.InspectSSE = value
+		} else {
+			cfg.SessionDiagnostics = value
 		}
+	case "history_scope":
+		var value string
+		if err := decodeString(raw, &value); err != nil {
+			return err
+		}
+		if value != "request" && value != "session" {
+			return fmt.Errorf("must be request or session")
+		}
+		cfg.HistoryScope = value
+	case "session_header":
+		var value string
+		if err := decodeString(raw, &value); err != nil {
+			return err
+		}
+		if !validSessionHeader(value) {
+			return fmt.Errorf("must be an HTTP header name for a stable session identity, not a credential, request or installation header")
+		}
+		cfg.SessionHeader = value
+	case "session_cache":
+		return setSessionCache(&cfg.SessionCache, raw)
 	case "cleanup_mode":
 		var value string
 		if err := decodeString(raw, &value); err != nil {
