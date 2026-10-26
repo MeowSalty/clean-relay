@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  windows:
+    name: Windows 检查与构建
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          # 项目仅使用标准库，没有 go.sum。
+          cache: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: 检查 Go 格式和静态问题
+        run: |
+          $taskUnformatted = & gofmt -l cmd internal
+          if ($LASTEXITCODE -ne 0) { throw 'gofmt failed.' }
+          if ($taskUnformatted) { throw "Run gofmt on: $($taskUnformatted -join ', ')" }
+          & go vet ./...
+          if ($LASTEXITCODE -ne 0) { throw 'go vet failed.' }
+
+      - name: 配置 Windows 竞态检测工具链
+        run: |
+          if (-not (Get-Command gcc -ErrorAction SilentlyContinue)) {
+            $taskCompiler = @('C:\msys64\mingw64\bin', 'C:\msys64\ucrt64\bin') |
+              Where-Object { Test-Path -LiteralPath (Join-Path $_ 'gcc.exe') } |
+              Select-Object -First 1
+            if (-not $taskCompiler) { throw 'GCC is required for Windows race tests.' }
+            $taskCompiler | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+      - name: 运行测试（含竞态与 Windows 退出测试）
+        env:
+          CGO_ENABLED: '1'
+          CC: gcc
+        run: |
+          & go test -race -json -count=1 -timeout=10m ./... 2>&1 | Tee-Object -FilePath test-results.out
+          if ($LASTEXITCODE -ne 0) { throw 'Go tests failed.' }
+
+      - name: 检查发布说明生成与回退
+        run: node --test .github/scripts/generate-release-notes.test.mjs
+
+      - name: 验证 Windows 发行文件
+        run: ./scripts/check-release.ps1
+
+      - name: 保存测试日志
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-test-results
+          path: test-results.out
+          retention-days: 7
+          if-no-files-found: ignore

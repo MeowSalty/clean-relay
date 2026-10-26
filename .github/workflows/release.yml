@@ -1,0 +1,129 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  checks:
+    name: 发布前检查
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Windows 二进制与 Release 草稿
+    needs: checks
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: 验证版本标签
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node .github/scripts/generate-release-notes.mjs --metadata
+          if ($LASTEXITCODE -ne 0) { throw 'Invalid release tag.' }
+
+      - name: 构建 Windows amd64 二进制
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ./scripts/build.ps1 -Version $env:RELEASE_VERSION -OutputDirectory dist/release
+          $taskVersion = & ./dist/release/clean-relay.exe -version
+          if ($LASTEXITCODE -ne 0 -or $taskVersion -cne "clean-relay $env:RELEASE_VERSION") {
+            throw 'The executable version does not match the release tag.'
+          }
+          & ./dist/release/clean-relay.exe -config ./dist/release/clean-relay.example.json -check-config
+          if ($LASTEXITCODE -ne 0) { throw 'The packaged configuration is invalid.' }
+
+      - name: 保存发行文件
+        uses: actions/upload-artifact@v7
+        with:
+          name: clean-relay-${{ github.ref_name }}-windows-amd64
+          # 明确列出文件，避免上传本地配置、日志等内容。
+          path: |
+            dist/release/clean-relay.exe
+            dist/release/clean-relay.exe.sha256
+            dist/release/clean-relay.example.json
+            dist/release/README.md
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: AI 生成更新说明（失败时回退提交列表）
+        timeout-minutes: 6
+        env:
+          CURRENT_TAG: ${{ github.ref_name }}
+          OUTPUT_PATH: release-notes.md
+          AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_MODEL: ${{ vars.AI_MODEL }}
+          AI_MAX_TOKENS: ${{ vars.AI_MAX_TOKENS }}
+          AI_REASONING_EFFORT: ${{ vars.AI_REASONING_EFFORT }}
+          AI_IDLE_TIMEOUT_MS: ${{ vars.AI_IDLE_TIMEOUT_MS }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: node .github/scripts/generate-release-notes.mjs
+
+      - name: 防止覆盖已正式发布的版本
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $taskHeaders = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
+          $taskRelease = Invoke-RestMethod `
+            -Uri "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" `
+            -Headers $taskHeaders -SkipHttpErrorCheck -StatusCodeVariable taskStatus
+          if ($taskStatus -eq 200) {
+            if (-not $taskRelease.draft) { throw 'This version is already published. Create a new version tag.' }
+          } elseif ($taskStatus -ne 404) {
+            throw "Cannot inspect the existing release (HTTP $taskStatus)."
+          }
+
+      - name: 创建 GitHub Release 草稿
+        id: release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: CleanRelay ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          draft: true
+          prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/release/clean-relay.exe
+            dist/release/clean-relay.exe.sha256
+            dist/release/clean-relay.example.json
+            dist/release/README.md
+
+      - name: 写入发布结果
+        env:
+          RELEASE_URL: ${{ steps.release.outputs.url }}
+        run: |
+          "Release 草稿：$env:RELEASE_URL" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "AI 说明回退：$env:AI_NOTES_FALLBACK" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
