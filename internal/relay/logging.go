@@ -15,17 +15,21 @@ import (
 type requestStateKey struct{}
 
 type requestState struct {
-	id               string
-	started          time.Time
-	inputItems       int
-	modifiedItems    int
-	removedFields    int
-	mu               sync.Mutex // Flush can run concurrently with the upstream read.
-	outcome          string
-	outputStarted    atomic.Bool
-	upstreamAttempts int
-	candidate        *retryRequest
-	retry            retryLog
+	id                 string
+	started            time.Time
+	inputItems         int
+	modifiedItems      int
+	removedFields      int
+	mu                 sync.Mutex // Flush can run concurrently with the upstream read.
+	outcome            string
+	outputStarted      atomic.Bool
+	upstreamAttempts   int
+	candidate          *retryRequest
+	retry              retryLog
+	session            *sessionRequest
+	sessionLog         sessionLog
+	sessionDiagnostics []any
+	completion         *completionObserver
 }
 
 func (s *requestState) setOutcome(outcome string) {
@@ -81,6 +85,25 @@ func (h *Handler) logRequest(r *http.Request, state *requestState, status int) {
 	if state.retry.businessFailure {
 		attrs = append(attrs, "retry_business_failure", true)
 	}
+	if h.retryConfig.HistoryScope == "session" {
+		attrs = append(attrs, "history_scope", "session")
+	}
+	if state.sessionLog.cache != "" {
+		attrs = append(attrs, "scope_cache", state.sessionLog.cache,
+			"scope_generation", state.sessionLog.generation, "scope_revision", state.sessionLog.revision,
+			"scope_pre_removed_item_ids", state.sessionLog.preIDs,
+			"scope_pre_removed_reasoning_items", state.sessionLog.preReasoning,
+			"scope_applied_selectors", state.sessionLog.appliedSelectors,
+			"scope_write_confirmed", state.sessionLog.writeConfirmed,
+			"recovery_acceptance", state.sessionLog.acceptance)
+	}
+	if state.sessionLog.alignment != "" {
+		attrs = append(attrs, "scope_alignment", state.sessionLog.alignment)
+	}
+	if state.completion != nil {
+		attrs = append(attrs, "recovery_observation", state.completion.reason)
+	}
+	attrs = append(attrs, state.sessionDiagnostics...)
 	h.logger.Log(context.Background(), level, "request", attrs...)
 }
 
@@ -132,7 +155,7 @@ func (w *responseWriter) FlushError() error {
 
 // responseBody observes errors that happen after response headers, when a local
 // error envelope can no longer be sent. ReverseProxy still owns the copy and
-// abort behavior; no SSE parsing or extra response buffering happens here.
+// abort behavior. Session completion observation never controls forwarding.
 type responseBody struct {
 	io.ReadCloser
 	state *requestState
@@ -140,6 +163,10 @@ type responseBody struct {
 
 func (b *responseBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
+	if b.state.completion != nil {
+		b.state.completion.feed(p[:n])
+		b.state.completion.end(err)
+	}
 	if err != nil && !errors.Is(err, io.EOF) {
 		b.state.setOutcome("interrupted")
 	}

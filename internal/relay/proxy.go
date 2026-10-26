@@ -51,6 +51,9 @@ func (h *Handler) newProxy(cfg config.Config) (*http.Transport, *httputil.Revers
 				return errUpstreamUpgrade
 			}
 			if state, ok := response.Request.Context().Value(requestStateKey{}).(*requestState); ok {
+				if state.session != nil {
+					state.completion = newCompletionObserver(response)
+				}
 				response.Body = &responseBody{ReadCloser: response.Body, state: state}
 			}
 			return nil

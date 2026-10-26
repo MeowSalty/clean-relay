@@ -84,41 +84,45 @@ func retryEndpoint(r *http.Request) (eligible, sse bool) {
 	return strings.HasSuffix(path, "/responses/compact"), false
 }
 
-func (h *Handler) prepareRetry(r *http.Request, state *requestState, plain []byte) {
+func (h *Handler) prepareRetry(r *http.Request, state *requestState, plain []byte) []byte {
 	if !h.retryConfig.Enabled {
-		return
+		return plain
 	}
 	eligible, sse := retryEndpoint(r)
 	if !eligible {
 		state.retry.decision = "out_of_scope"
-		return
+		return plain
 	}
 	for key := range r.Header {
 		if strings.EqualFold(key, "Idempotency-Key") || strings.EqualFold(key, "X-Idempotency-Key") {
 			state.retry.decision = "idempotency_key"
-			return
+			return plain
 		}
 		if strings.EqualFold(key, "Last-Event-ID") {
 			state.retry.decision = "stream_resume"
-			return
+			return plain
 		}
 	}
 	analysis, err := cleaner.AnalyzeHistory(plain, cleaner.PortableIDsAndReasoning)
 	if err != nil {
 		state.retry.decision = "transform_failed"
-		return
+		return plain
 	}
 	if analysis.Background {
 		state.retry.decision = "background_request"
-		return
+		return plain
+	}
+	if h.retryConfig.HistoryScope == "session" {
+		return h.prepareSession(r, state, plain, sse)
 	}
 	plan := historyPlan(h.retryConfig.CleanupMode, analysis)
 	if len(plan) == 0 {
 		state.retry.decision = "no_candidate"
-		return
+		return plain
 	}
 	state.candidate = &retryRequest{body: plain, plan: plan, sse: sse}
 	state.retry.decision = "response_not_inspected"
+	return plain
 }
 
 type retryTransport struct {
@@ -132,8 +136,16 @@ func (t *retryTransport) RoundTrip(request *http.Request) (*http.Response, error
 		return t.base.RoundTrip(request)
 	}
 	candidate := state.candidate
-	defer func() { state.candidate = nil }()
+	defer func() {
+		state.candidate = nil
+		if state.session != nil {
+			state.session.snapshot = cleaner.HistorySnapshot{}
+		}
+	}()
 	if candidate == nil {
+		if state.session != nil {
+			request = state.session.outgoing(request)
+		}
 		state.upstreamAttempts++
 		return t.base.RoundTrip(request)
 	}
@@ -147,8 +159,13 @@ func (t *retryTransport) RoundTrip(request *http.Request) (*http.Response, error
 	}
 	plan := candidate.plan
 	sentIDs, sentReasoning := 0, 0
+	initial := request
+	if state.session != nil {
+		sentIDs, sentReasoning = state.sessionLog.preIDs, state.sessionLog.preReasoning
+		initial = state.session.outgoing(request)
+	}
 	state.upstreamAttempts++
-	response, err := t.attempt(request)
+	response, err := t.attempt(initial)
 	started := time.Now()
 	for {
 		if err != nil {
@@ -191,6 +208,9 @@ func (t *retryTransport) RoundTrip(request *http.Request) (*http.Response, error
 		if state.retry.rule == "" {
 			state.retry.rule, state.retry.source = resourceMismatchRule, source
 		}
+		if state.session != nil && !state.session.frozen {
+			plan = state.session.freeze(state, t.config.CleanupMode)
+		}
 
 		var next *http.Request
 		var record retryAttemptLog
@@ -199,7 +219,18 @@ func (t *retryTransport) RoundTrip(request *http.Request) (*http.Response, error
 			plan = plan[1:]
 			// Every copy comes from B0. Comparing removal counts against the
 			// last sent copy prevents resending B1 as a nominally stronger B2.
-			repaired, repairErr := cleaner.RepairHistory(candidate.body, mode)
+			var repaired cleaner.HistoryResult
+			var repairErr error
+			if state.session != nil {
+				var current bool
+				repaired, current, repairErr = state.session.repair(candidate.body, mode)
+				if !current {
+					state.retry.stop("scope_changed")
+					return response, nil
+				}
+			} else {
+				repaired, repairErr = cleaner.RepairHistory(candidate.body, mode)
+			}
 			if repairErr != nil {
 				state.retry.stop("transform_failed")
 				return response, nil
@@ -253,6 +284,9 @@ func (t *retryTransport) RoundTrip(request *http.Request) (*http.Response, error
 		response = nil
 		if len(plan) == 0 {
 			candidate.body = nil
+		}
+		if state.session != nil {
+			next = state.session.outgoing(next)
 		}
 		response, err = t.attempt(next)
 		started = time.Now()

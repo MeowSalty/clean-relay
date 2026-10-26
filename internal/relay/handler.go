@@ -38,6 +38,7 @@ type Handler struct {
 	idPrefix     string
 	nextID       atomic.Uint64
 	retryConfig  config.AzureResourceRetryConfig
+	sessions     *sessionManager
 }
 
 // New copies configuration used by requests, so subsequent changes to cfg do
@@ -53,6 +54,9 @@ func New(cfg config.Config, logger *slog.Logger) *Handler {
 		logger:       logger,
 		idPrefix:     "local-" + rand.Text() + "-",
 		retryConfig:  cfg.AzureResourceRetry,
+	}
+	if cfg.AzureResourceRetry.HistoryScope == "session" || cfg.AzureResourceRetry.SessionDiagnostics {
+		h.sessions = newSessionManager(cfg)
 	}
 	h.transport, h.proxy = h.newProxy(cfg)
 	return h
@@ -86,6 +90,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.retryConfig.Enabled {
 		state.retry.decision = "no_candidate"
 	}
+	h.addSessionDiagnostics(r, state)
 	observed := &responseWriter{ResponseWriter: w, state: state}
 	defer func() {
 		caught := recover()
@@ -98,6 +103,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				state.retry.stop("canceled")
 			}
 		}
+		h.finishSession(r, state)
 		h.logRequest(r, state, observed.status)
 		if caught != nil {
 			// ReverseProxy uses ErrAbortHandler to terminate a partial response.
@@ -176,9 +182,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		state.inputItems, state.modifiedItems, state.removedFields = result.InputItems, result.ModifiedItems, result.RemovedFields
-		h.prepareRetry(r, state, result.Body)
-		if result.RemovedFields != 0 {
-			wire = result.Body
+		prepared := h.prepareRetry(r, state, result.Body)
+		if result.RemovedFields != 0 || !bytes.Equal(prepared, result.Body) {
+			wire = prepared
 			for _, key := range []string{"Content-MD5", "Digest", "Content-Digest", "Repr-Digest"} {
 				deleteHeader(forward.Header, key)
 			}
