@@ -2,7 +2,20 @@
 
 CleanRelay 是本机 HTTP/SSE 请求清理代理，可选支持条件资源修复、逐级修复和会话范围修复。
 
-运行环境为 Windows 10 amd64；运行 exe 不需要安装 Go。交付目录包含 `clean-relay.exe`、`clean-relay.example.json`、本说明和 exe 的 SHA256 校验文件。
+运行环境为 Windows 10/11 x64（amd64）；运行 exe 不需要安装 Go。交付目录包含 `clean-relay.exe`、`clean-relay.example.json`、本说明和 exe 的 SHA256 校验文件。
+
+## 下载与校验
+
+从 [GitHub Releases](https://github.com/MeowSalty/clean-relay/releases) 下载 `clean-relay.exe`、`clean-relay.exe.sha256`、`clean-relay.example.json` 和 `README.md`，放入同一目录。在 PowerShell 中核对二进制校验值并查看版本：
+
+```powershell
+$expectedHash = (Get-Content -LiteralPath .\clean-relay.exe.sha256).Split(' ')[0]
+$actualHash = (Get-FileHash -LiteralPath .\clean-relay.exe -Algorithm SHA256).Hash
+if ($actualHash -ine $expectedHash) { throw 'SHA256 校验失败，请重新下载。' }
+.\clean-relay.exe -version
+```
+
+升级时先退出旧进程，保留自己的 `clean-relay.json`，替换 exe 并重新校验配置后启动。示例配置用于对照新增选项，不要覆盖已有的本地配置。
 
 ## 配置与启动
 

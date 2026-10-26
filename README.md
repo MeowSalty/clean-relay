@@ -12,15 +12,17 @@ flowchart LR
 
 ## 快速开始
 
-构建需要 Go 1.26 和 PowerShell 7：
+从 [GitHub Releases](https://github.com/MeowSalty/clean-relay/releases) 下载 Windows amd64 发行文件：`clean-relay.exe`、`clean-relay.exe.sha256`、`clean-relay.example.json` 和 `README.md`，放在同一目录。运行发行版无需安装 Go；校验下载文件的方法见 [Windows 启动说明](docs/windows-usage.md)。
+
+从源码构建需要 Go 1.26 和 PowerShell 7：
 
 ```powershell
 .\scripts\build.ps1
 ```
 
-产物位于 `dist`：exe、示例配置、独立启动说明（`docs/windows-usage.md` 的副本）和 SHA256 校验文件。默认版本 `0.1.0-dev`，可用 `-Version <version>` 指定；构建固定 Windows amd64 并关闭 CGO。
+产物位于 `dist`：exe、示例配置、独立启动说明（`docs/windows-usage.md` 的副本）和 SHA256 校验文件。默认版本 `0.1.0-dev`，可用 `-Version <version>` 指定；`-OutputDirectory <path>` 可指定输出目录，相对路径以仓库根目录为基准。构建固定 Windows amd64（`GOAMD64=v1`）并关闭 CGO。
 
-在 `dist` 中：
+在发行文件所在目录中（源码构建时为 `dist`）：
 
 1. 复制 `clean-relay.example.json` 为 `clean-relay.json`，把 `upstream_origin` 改为上游的协议、主机和可选端口（不含路径）。
 2. 校验并启动：
@@ -81,6 +83,7 @@ flowchart LR
 
 - [Windows 启动说明](docs/windows-usage.md)：配置、接入、日志字段、错误处理与退出；构建时复制为 `dist/README.md`。
 - [配置样例](clean-relay.example.json)：完整配置，条件修复默认关闭。
+- [发布流程](docs/releasing.md)：Windows 二进制发布、AI 更新说明配置和 Release 草稿审核。
 - [输入样例](testdata/requests/metadata.before.json) / [期望输出](testdata/requests/metadata.after.json)：合成数据，展示 8 个元素中删除 7 个字段后的结果。
 
 样例用于验证清理行为（数字精度、扩展字段），不作为发往渠道的业务请求。
@@ -93,5 +96,14 @@ go test ./...
 go vet ./...
 go test -race ./...   # Windows 需要 C 工具链
 ```
+
+GitHub Actions 会在 Windows 上运行格式检查、`go vet`、竞态测试和发行文件验证。发布工具检查可在本地执行（发布说明测试额外需要 Node.js 22 或更新版本）：
+
+```powershell
+node --test .github/scripts/generate-release-notes.test.mjs
+.\scripts\check-release.ps1
+```
+
+推送 `v0.1.0` 或 `v0.1.0-rc.1` 这样的版本标签会在检查通过后生成 GitHub Release 草稿，附带 Windows 二进制和 AI 更新说明；缺少 AI 配置或生成失败时自动回退为提交列表。具体操作见 [发布流程](docs/releasing.md)。
 
 测试全部使用本地假上游，覆盖 JSON/gzip、数字精度与重复键、SSE 分段、取消、并发、超时，以及会话范围刷新、缓存存活期、修订合并、内存淘汰和完成观察；Windows 退出行为需在 Windows 上验证。既有桌面会话头与渠道切换的人工接入验收不替代本次新增流程：“修复写出后取消 → 新增历史 → 同类错误 → 再次恢复”的真实渠道验收仍待完成。行为变更请补充对应的回归测试。
