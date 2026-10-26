@@ -107,7 +107,7 @@ compaction、旧响应引用、`call_id` 和嵌套资源 ID 保留。旧 `drop_i
 
 ## 会话范围修复
 
-`history_scope=session` 会记住一次资源错误对应请求中的候选项。后续请求先完成元数据清理，再仅对精确匹配的旧项重放已采用的动作；这次错误之后新生成的消息和 reasoning 保留。客户端保存的历史不被改写。
+`history_scope=session` 会合并每次精确资源错误对应请求中的候选项。后续首发先完成元数据清理，再仅对精确匹配的旧项重放已成功写出的动作；新消息和 reasoning 在进入自己的失败请求之前保留。范围更新不要求上一轮 completed，客户端保存的历史不被改写。
 
 ### 验证会话标识
 
@@ -151,10 +151,10 @@ compaction、旧响应引用、`call_id` 和嵌套资源 ID 保留。旧 `drop_i
 | `session_diagnostics` | `false`；布尔值，可独立启用 |
 | `session_cache.idle_ttl` | `2h`；正 Go 时长，匹配旧项刷新空闲时间 |
 | `session_cache.max_sessions` | `256`；正整数，会话按凭据身份隔离 |
-| `session_cache.max_items_per_session` | `4096`；正整数，合计各路径、模型、代次的选择器及锚点 |
+| `session_cache.max_items_per_session` | `4096`；正整数，合计各路径、模型命名空间中的选择器及锚点，含未写出的候选 |
 | `session_cache.max_bytes` | `67108864`；正整数，缓存结构采用保守字节计费 |
 
-超限按会话整组淘汰最久未使用的记录，单个超大组不部分保留。该预算限制持久于请求之间的缓存；正在转发的请求及完成观察缓冲另受请求大小、并发数和观察上限约束。重启、过期或淘汰会丢失旧边界；下一次精确资源错误以当时的请求重新建立边界，保护新增项的保证仅在原记录有效期间成立。
+超限按会话整组淘汰最久未使用的记录，单个超大组不部分保留。未写出的候选同样计入预算；超大请求仍可局部修复，但成功写回调不会偷偷重建缓存。该预算限制持久于请求之间的缓存；正在转发的请求及完成观察缓冲另受请求大小、并发数和观察上限约束。重启、过期或淘汰会丢失记忆；下一次有效请求精确命中资源错误时，以它自己的快照重新建立范围。
 
 未知键、重复键、`null`、非法类型和预算越界继续严格拒绝，即使 `enabled=false` 也会校验。回到逐请求范围时设置 `history_scope=request`；回退到不支持会话配置的旧 exe 前，需移除以上新增字段。
 
@@ -162,15 +162,23 @@ compaction、旧响应引用、`call_id` 和嵌套资源 ID 保留。旧 `drop_i
 
 会话范围按客户端凭据、会话头、上游 origin、路径前缀、模型和查询串隔离；同一路径前缀的 `/responses` 与 `/responses/compact` 共用范围。不同会话之间不共享边界，分支若采用不同会话标识也独立处理。
 
-带 ID 的项需要类型、ID 及内容指纹一致；无 ID 的 reasoning 可使用密文指纹。匿名 reasoning 仅在双侧唯一锚点、区间内容及出现次数一致时跨请求匹配。无法对齐的匿名项保留并记录 `scope_alignment_unavailable`，不会退回删除全部 reasoning。编辑、裁剪或重复插入可能让旧项无法匹配；手动压缩后的新窗口若不再含旧选择器，自然不产生清理，回退后重新出现的可识别旧项仍会匹配。
+带 ID 的项需要类型、ID 及内容指纹一致；无 ID 的 reasoning 可使用密文指纹。匿名 reasoning 仅在双侧唯一锚点、区间内容及出现次数一致时跨请求匹配。首发无法对齐的匿名项保留并记录 `scope_alignment_unavailable`；若本次又精确报错，则可使用本次快照的请求局部选择器清理，不能把匿名指纹变成全会话删除规则。编辑、裁剪或重复插入可能让旧项无法匹配；手动压缩后的新窗口若不再含旧选择器，自然不产生预清理，回退后重新出现的可识别旧项仍会匹配。短历史不能覆盖并清空此前记忆。
 
 三个挡位仅作用于选中范围。逐级模式记住实际发送过的升级动作；每个入站请求的上游调用上限仍为两次或三次。空数组、无变化副本、幂等键、流恢复、后台请求、取消和输出后的重试边界同样适用于会话模式的首发预处理。
 
-边界冻结、动作发送和恢复完成分别记录。动作只有在传输层确认请求写入成功后才进入缓存；连接失败或发送前取消不能算作已应用。强修复的真实错误继续返回，后续同类错误不会把新历史不断加入同一旧范围。
+候选冻结、动作写出和恢复完成分别记录。精确错误可以先保存未应用候选，只有该次上游调用收到成功 `WroteRequest` 回调，实际采用的动作才供后续首发使用。连接失败、失败写回调或发送前取消不能算作已应用；成功写出后的取消、断流、客户端写入失败或业务错误不会撤销这些动作。
+
+每次符合条件的请求再次精确命中资源错误，都能合并本请求中仍可清理的候选，不要求上一轮 completed。首发候选数按实际输入项减去预清理删除数计算；修复副本全部来自同一份元数据清理后的快照，保留本请求上次发送的全部动作，并至少新增一个动作。没有剩余候选时记录 `no_candidate`，拟发送副本没有新增动作时记录 `no_change`，均不原样重发。符合清理资格的当前用户消息也可能删除直接 ID，正文仍保留；普通项自身 `status` 缺省或为 `completed` 的资格规则保持不变。
+
+例如 A 修复写出后取消，下一次 A+B 首发只清理 A；该请求再次精确报错时可清理 B 并重发。随后 A+B+C 正常成功时只清理 A、B，C 保留；C 只有进入自己的精确失败请求后才可能增加清理。成功、普通错误、单纯追加历史或输出后的 SSE 错误均不扩展范围。
+
+同一缓存存活期的候选和已写出动作只增长。P 携带 A+B、Q 携带 A+D 时，各自修复仍只处理自己的请求，写回调无论先后都会合并成 A+B+D；较旧修订的回调不能误标后来追加的条目。淘汰或过期后的旧请求和旧回调不能复活记录，即使同一键已经建立新记录；在途请求记录 `scope_changed` 并交还当前响应，下次请求重新判断。
 
 完成观察只查看原样转发的字节，不额外读流或等待完整长流。JSON 要求完整文档、`status=completed`、数组形态的 `output`、无错误和未完成信息；若提供 `object`，必须为 `response`。SSE 要求一致的 `response.completed` 事件及嵌套完成状态。单个 JSON 文档或 SSE 事件上限为 1 MiB，SSE 总长度不受该上限限制。`inspect_sse` 仅控制早期错误检查，完成观察独立进行。
 
-HTTP 200、`[DONE]` 或 EOF 单独都不构成成功证据。失败、超限、压缩响应、不支持的格式、取消、断流或客户端写入失败保持 `unknown`，转发字节不变。仅当上一代已明确完成，之后的请求再次命中精确资源错误且具有新候选时，才建立下一代；旧的并发响应不能确认新代次。
+HTTP 200、`[DONE]` 或 EOF 单独都不构成成功证据。失败、超限、压缩响应、不支持的格式、取消、断流或客户端写入失败不能确认 `recovery_acceptance=completed`，转发字节不变。`recovery_observation` 只描述本响应的解析结果；旧并发响应即使被观察为 completed，也不能确认已扩大的新修订。两种日志都不控制下一次候选生成、范围扩展或重发。
+
+本次版本直接更新现有 `session` 配置的行为，不增加开关。持续资源错误可能使新增 reasoning 陆续进入删除范围；程序仍不能定位唯一坏项、修复未支持的引用或控制 AxonHub 路由。回到 `request` 仅改变历史记忆方式；若必须恢复“上一轮 completed 后才允许扩大范围”的旧策略，需要回退程序版本。
 
 ### 会话日志
 
@@ -180,15 +188,18 @@ HTTP 200、`[DONE]` 或 EOF 单独都不构成成功证据。失败、超限、�
 | --- | --- |
 | `history_scope` | 会话模式为 `session` |
 | `scope_cache` | `miss`、`hit`、`scope_created`、`scope_reused`、`scope_extended`、`scope_cache_budget` 或 `scope_changed` |
-| `scope_generation` / `scope_revision` | 本次涉及的故障代次及版本，不含资源 ID |
+| `scope_generation` / `scope_revision` | 缓存记录的存活期及修订；追加范围只增加修订，不能推断资源切换次数 |
 | `scope_pre_removed_item_ids` / `scope_pre_removed_reasoning_items` | 本次首发预处理的实际删除数 |
+| `scope_added_selectors` | 本次错误实际加入缓存的去重候选数；未缓存时为 0，不表示动作已写出 |
 | `scope_applied_selectors` | 所观察缓存版本中已应用的选择器数量，非本次删除数 |
 | `scope_write_confirmed` | 最后一次带恢复范围的上游请求是否收到成功写入回调 |
 | `scope_alignment` | 无法安全对齐匿名项时为 `scope_alignment_unavailable` |
 | `recovery_observation` | 本次响应的完成观察结果，如 `completed`、`business_failure`、`completion_limit` |
 | `recovery_acceptance` | 仅正常转发结束且成功确认对应缓存版本时为 `completed`，其他为 `unknown` |
 
-`scope_created` 只表示冻结了边界；`scope_write_confirmed=true` 只表示请求已写出，均不等于业务恢复。过时响应即使观察到完成事件，也不能把 `recovery_acceptance` 记为完成。通知压缩、自动压缩和 `recovery_action` 配置尚未实现。
+`scope_created` / `scope_extended` 只表示保存了候选；`scope_write_confirmed=true` 只表示请求已写出，均不等于上游接受或业务恢复。过时响应即使观察到完成事件，也不能把 `recovery_acceptance` 记为完成。通知压缩、自动压缩和 `recovery_action` 配置尚未实现。
+
+本次新增流程的真实渠道验收仍待完成：让强修复请求成功写出后取消，追加历史并再次触发同类资源错误，确认首发只预清理旧项、随后只增加本请求的动作且总调用不超过两次。记录清理数量、调用次数及完成诊断即可，不记录正文或凭据。本地假上游自动测试不替代这一接入验收。
 
 ## 观察与停止
 
@@ -200,9 +211,9 @@ level=INFO msg=request request_id=local-... method=POST path=/v1/responses input
 
 `outcome=canceled` 表示客户端或服务 context 取消；`outcome=interrupted` 表示响应转发中断。响应已开始后的失败会结束当前响应，不插入 JSON 或完成事件。
 
-条件修复字段合并在同一条结束日志中：`upstream_attempts` 记录应用层实际调用次数（0 到 3），`retry_decision=retried` 一旦发起重发就保持不变；`retry_cleanup_mode` 始终记录配置策略。`retry_removed_item_ids` 和 `retry_removed_reasoning_items` 是最近一次成功生成副本相对首发快照的删除数，不跨级别累加，也不计入旧 `removed_fields`。`retry_rule=azure_resource_mismatch`、`retry_error_source=http_json` 或 `sse` 记录首次匹配，`first_upstream_status` 记录首次响应状态。
+条件修复字段合并在同一条结束日志中：`upstream_attempts` 记录应用层实际调用次数（0 到 3），`retry_decision=retried` 一旦发起重发就保持不变；`retry_cleanup_mode` 始终记录配置策略。`retry_removed_item_ids` 和 `retry_removed_reasoning_items` 是最近一次成功生成副本相对元数据清理后、会话预清理前的 `B0` 的总删除数，不跨级别累加，也不计入旧 `removed_fields`。`retry_rule=azure_resource_mismatch`、`retry_error_source=http_json` 或 `sse` 记录首次匹配，`first_upstream_status` 记录首次响应状态。
 
-候选请求另有 `retry_stop_reason`，说明最终为何停止修复，如 `no_match`、`output_started`、`inspection_timeout`、`canceled` 或 `stages_exhausted`；最后一个只表示计划已耗尽，不代表模型成功。实际发送第 2/3 次调用时才分别创建 `retry_attempt_2` / `retry_attempt_3` 分组，包含本次清理级别、紧邻触发响应的状态/来源，以及相对首发的删除数。生成后因空数组或取消而未发送的副本没有对应分组。
+候选请求另有 `retry_stop_reason`，说明最终为何停止修复，如 `no_match`、`output_started`、`inspection_timeout`、`canceled` 或 `stages_exhausted`；最后一个只表示计划已耗尽，不代表模型成功。实际调用第 2/3 次上游时才分别创建 `retry_attempt_2` / `retry_attempt_3` 分组，包含本次清理级别、紧邻触发响应的状态/来源，以及相对 `B0` 的总删除数。新增的 `new_removed_item_ids` / `new_removed_reasoning_items` 表示比本请求上一份已发送副本多删除的数量，不以最新缓存作为差量基准。生成后因空数组或取消而未调用的副本没有对应分组；调用过不等于收到成功写回调。
 
 当前不会在检测到错误或开始重发的瞬间单独打印日志，以上字段要等整个请求处理结束后才输出。对于 SSE，需要等流结束、中断或取消。正常传输完成的结束日志为 `INFO` 级别，默认 `log_level: "info"` 可见；设置为 `warn` 或 `error` 会过滤此类记录。
 
