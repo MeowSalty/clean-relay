@@ -21,10 +21,12 @@ type recoveryItem struct {
 
 // Published scopes and their slices are immutable. Readers never hold the
 // store lock while hashing, transforming, inspecting or sending a request.
+// Generation identifies a cache lifetime. Within it, items are append-only:
+// a selector's index never changes and its applied state can only become true.
 type recoveryScope struct {
 	generation uint64
 	revision   uint64
-	accepted   bool
+	accepted   bool // Completion diagnostics only; never authorizes repair.
 	items      []recoveryItem
 }
 
@@ -104,21 +106,20 @@ func (c *recoveryStore) touch(key recoveryKey, view recoverySnapshot) {
 	}
 }
 
-// freeze uses evidence available when the incoming request was prepared, not
-// a completion which raced ahead while that request was in flight.
-func (c *recoveryStore) freeze(key recoveryKey, before recoverySnapshot, selectors []cleaner.HistorySelector) (recoverySnapshot, string) {
+// freeze merges only the failing request's candidates into the same cache
+// lifetime. The count includes only new selectors actually installed in cache.
+func (c *recoveryStore) freeze(key recoveryKey, before recoverySnapshot, selectors []cleaner.HistorySelector) (recoverySnapshot, string, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.expire()
 	current := c.snapshot(key)
 	if before.scope != nil && (current.scope == nil || current.scope.generation != before.scope.generation) {
-		return recoverySnapshot{}, "scope_changed"
+		return recoverySnapshot{}, "scope_changed", 0
 	}
-	if before.scope == nil && current.scope == nil && before.epoch != c.epoch {
-		return recoverySnapshot{}, "scope_changed"
-	}
-	if current.scope != nil && !(sameRecoveryVersion(before.scope, current.scope) && before.scope.accepted) {
-		return current, "scope_reused"
+	// A record may have been created, evicted and recreated since a miss.
+	// Check its epoch even when there is now a record at this key.
+	if before.scope == nil && before.epoch != c.epoch {
+		return recoverySnapshot{}, "scope_changed", 0
 	}
 	seen := make(map[cleaner.HistorySelector]bool)
 	var prior []recoveryItem
@@ -137,34 +138,38 @@ func (c *recoveryStore) freeze(key recoveryKey, before recoverySnapshot, selecto
 	}
 	if len(added) == 0 {
 		if current.scope == nil {
-			return current, "no_candidate"
+			return current, "no_candidate", 0
 		}
-		// A fresh failure without new candidates does not create a generation,
-		// nor leave an old completion available to justify future expansion.
+		// Invalidate earlier completion proofs even without new selectors.
+		// This revision change never gates later candidates or write evidence.
 		next := *current.scope
 		next.accepted = false
 		next.revision++
 		c.conversations[key.conversation].namespaces[key.namespace] = &next
 		current.scope = &next
-		return current, "scope_reused"
+		return current, "scope_reused", 0
 	}
-	c.generation++
 	scope := &recoveryScope{
-		generation: c.generation, revision: 1,
 		items: make([]recoveryItem, len(prior)+len(added)),
+	}
+	if current.scope == nil {
+		c.generation++
+		scope.generation, scope.revision = c.generation, 1
+	} else {
+		scope.generation, scope.revision = current.scope.generation, current.scope.revision+1
 	}
 	copy(scope.items, prior)
 	copy(scope.items[len(prior):], added)
 	view := recoverySnapshot{scope: scope, epoch: c.epoch}
 	if !c.install(key, scope) {
 		view.epoch = c.epoch
-		return view, "scope_cache_budget"
+		return view, "scope_cache_budget", 0
 	}
 	view.cached, view.epoch = true, c.epoch
-	if len(prior) == 0 {
-		return view, "scope_created"
+	if current.scope == nil {
+		return view, "scope_created", len(added)
 	}
-	return view, "scope_extended"
+	return view, "scope_extended", len(added)
 }
 
 func scopeSize(scope *recoveryScope) (int, int64) {
@@ -223,12 +228,16 @@ func (c *recoveryStore) sent(key recoveryKey, before recoverySnapshot, desired [
 	defer c.mu.Unlock()
 	c.expire()
 	current := c.snapshot(key)
-	if !before.cached || current.scope == nil || current.scope.generation != before.scope.generation {
+	if !before.cached || current.scope == nil || current.scope.generation != before.scope.generation ||
+		len(current.scope.items) < len(desired) {
 		return recoverySnapshot{}, false
 	}
 	exact := sameRecoveryVersion(before.scope, current.scope)
 	changed := false
 	for i, apply := range desired {
+		if current.scope.items[i].selector != before.scope.items[i].selector {
+			return recoverySnapshot{}, false
+		}
 		changed = changed || apply && !current.scope.items[i].applied
 	}
 	if changed {

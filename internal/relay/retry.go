@@ -35,11 +35,13 @@ type retryLog struct {
 }
 
 type retryAttemptLog struct {
-	mode             cleaner.HistoryMode
-	triggerStatus    int
-	source           string
-	removedIDs       int
-	removedReasoning int
+	mode                cleaner.HistoryMode
+	triggerStatus       int
+	source              string
+	removedIDs          int
+	removedReasoning    int
+	newRemovedIDs       int
+	newRemovedReasoning int
 }
 
 func (l *retryLog) stop(reason string) {
@@ -205,11 +207,18 @@ func (t *retryTransport) RoundTrip(request *http.Request) (*http.Response, error
 			state.retry.stop(result.decision)
 			return response, nil
 		}
+		if state.outputStarted.Load() {
+			state.retry.stop("output_started")
+			return response, nil
+		}
 		if state.retry.rule == "" {
 			state.retry.rule, state.retry.source = resourceMismatchRule, source
 		}
 		if state.session != nil && !state.session.frozen {
 			plan = state.session.freeze(state, t.config.CleanupMode)
+			if state.session.view.scope == nil {
+				return response, nil
+			}
 		}
 
 		var next *http.Request
@@ -217,8 +226,10 @@ func (t *retryTransport) RoundTrip(request *http.Request) (*http.Response, error
 		for len(plan) > 0 {
 			mode := plan[0]
 			plan = plan[1:]
-			// Every copy comes from B0. Comparing removal counts against the
-			// last sent copy prevents resending B1 as a nominally stronger B2.
+			// Every copy comes from B0 and each item has one eligible action.
+			// Modes only strengthen; session selectors and applied actions only
+			// grow within a lifetime. These invariants make per-action counts
+			// sufficient to compare against this request's last sent copy.
 			var repaired cleaner.HistoryResult
 			var repairErr error
 			if state.session != nil {
@@ -247,7 +258,8 @@ func (t *retryTransport) RoundTrip(request *http.Request) (*http.Response, error
 			}
 			next = repairedRequest(request, repaired.Body)
 			record = retryAttemptLog{mode: mode, triggerStatus: response.StatusCode, source: source,
-				removedIDs: repaired.RemovedItemIDs, removedReasoning: repaired.RemovedReasoningItems}
+				removedIDs: repaired.RemovedItemIDs, removedReasoning: repaired.RemovedReasoningItems,
+				newRemovedIDs: repaired.RemovedItemIDs - sentIDs, newRemovedReasoning: repaired.RemovedReasoningItems - sentReasoning}
 			break
 		}
 		if request.Context().Err() != nil {
@@ -270,6 +282,11 @@ func (t *retryTransport) RoundTrip(request *http.Request) (*http.Response, error
 			state.retry.stop("canceled")
 			_ = next.Body.Close()
 			return nil, request.Context().Err()
+		}
+		if state.outputStarted.Load() {
+			state.retry.stop("output_started")
+			_ = next.Body.Close()
+			return response, nil
 		}
 		if state.upstreamAttempts == 1 {
 			state.retry.firstStatus = response.StatusCode

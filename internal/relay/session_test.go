@@ -200,7 +200,7 @@ func TestSessionRepairRemembersOnlyOldItems(t *testing.T) {
 	}
 }
 
-func TestSessionPersistentErrorsDoNotExpandScope(t *testing.T) {
+func TestSessionPersistentErrorsExtendScopeWithoutCompletion(t *testing.T) {
 	var sequence atomic.Int64
 	seen := make(chan retryObserved, 8)
 	h := streamNewHarness(t, sessionOptions("portable_ids_and_reasoning"), func(w http.ResponseWriter, r *http.Request) {
@@ -219,16 +219,20 @@ func TestSessionPersistentErrorsDoNotExpandScope(t *testing.T) {
 	}
 	<-seen
 	<-seen
-	for i := 0; i < 2; i++ {
-		status, _, line := sessionExchange(t, h, "/v1/responses", sessionNext(t), sessionHeaders())
-		if status != 400 || !strings.Contains(line, "upstream_attempts=1") || strings.Contains(line, "scope_extended") {
-			t.Fatalf("persistent fault expanded or retried: %s", line)
-		}
-		sessionAssertWindow(t, streamReceive(t, seen, "persistent fault request").body, false, true)
+	status, _, line := sessionExchange(t, h, "/v1/responses", sessionNext(t), sessionHeaders())
+	if status != 400 || !strings.Contains(line, "upstream_attempts=2") || !strings.Contains(line, "scope_cache=scope_extended") {
+		t.Fatalf("persistent fault did not repair new history: %s", line)
 	}
+	sessionAssertWindow(t, streamReceive(t, seen, "persistent fault first send").body, false, true)
+	sessionAssertWindow(t, streamReceive(t, seen, "persistent fault repair").body, false, false)
+	status, _, line = sessionExchange(t, h, "/v1/responses", sessionNext(t), sessionHeaders())
+	if status != 400 || !strings.Contains(line, "upstream_attempts=1") || !strings.Contains(line, "retry_decision=no_candidate") {
+		t.Fatalf("fully precleaned history was resent: %s", line)
+	}
+	sessionAssertWindow(t, streamReceive(t, seen, "fully precleaned request").body, false, false)
 }
 
-func TestSessionCompletedRecoveryAllowsNextGeneration(t *testing.T) {
+func TestSessionCompletedRecoveryExtendsSameGeneration(t *testing.T) {
 	var sequence atomic.Int64
 	seen := make(chan retryObserved, 10)
 	h := streamNewHarness(t, sessionOptions("portable_ids_and_reasoning"), func(w http.ResponseWriter, r *http.Request) {
@@ -245,8 +249,9 @@ func TestSessionCompletedRecoveryAllowsNextGeneration(t *testing.T) {
 	<-seen
 	<-seen
 	_, _, line := sessionExchange(t, h, "/v1/responses", sessionNext(t), sessionHeaders())
-	if !strings.Contains(line, "scope_cache=scope_extended") || !strings.Contains(line, "recovery_acceptance=completed") {
-		t.Fatalf("new fault generation not confirmed: %s", line)
+	if !strings.Contains(line, "scope_cache=scope_extended") || !strings.Contains(line, "recovery_acceptance=completed") ||
+		!strings.Contains(line, "scope_generation=1 ") {
+		t.Fatalf("extended scope changed lifetime or was not confirmed: %s", line)
 	}
 	sessionAssertWindow(t, streamReceive(t, seen, "B first send").body, false, true)
 	sessionAssertWindow(t, streamReceive(t, seen, "B repair").body, false, false)
@@ -255,7 +260,7 @@ func TestSessionCompletedRecoveryAllowsNextGeneration(t *testing.T) {
 	observed := streamReceive(t, seen, "C first send")
 	sessionAssertWindow(t, observed.body, false, false)
 	if !sessionHasID(t, observed.body, "c-reasoning") || sequence.Load() != 5 {
-		t.Fatal("new generation removed later C history or repeated the retry")
+		t.Fatal("extended scope removed later C history or repeated the retry")
 	}
 }
 

@@ -85,13 +85,14 @@ func TestSessionClientWriteFailureCannotConfirmRecovery(t *testing.T) {
 	<-seen
 	<-seen
 	status, _, line := sessionExchange(t, h, "/v1/responses", sessionNext(t), sessionHeaders())
-	if status != 400 || calls.Load() != 3 || strings.Contains(line, "scope_extended") {
-		t.Fatalf("failed forwarding authorized new history: %s", line)
+	if status != 400 || calls.Load() != 4 || !strings.Contains(line, "scope_cache=scope_extended") {
+		t.Fatalf("failed forwarding blocked a later repair: %s", line)
 	}
 	sessionAssertWindow(t, streamReceive(t, seen, "request after failed forwarding").body, false, true)
+	sessionAssertWindow(t, streamReceive(t, seen, "repair after failed forwarding").body, false, false)
 }
 
-func TestSessionConcurrentFirstFaultKeepsWinningSnapshot(t *testing.T) {
+func TestSessionConcurrentFirstFaultMergesEachSnapshot(t *testing.T) {
 	olderReady, longerReady := make(chan struct{}), make(chan struct{})
 	releaseOlder, releaseLonger := make(chan struct{}), make(chan struct{})
 	seen := make(chan retryObserved, 8)
@@ -151,18 +152,18 @@ func TestSessionConcurrentFirstFaultKeepsWinningSnapshot(t *testing.T) {
 	close(releaseLonger)
 	second := streamReceive(t, done, "concurrent longer recovery")
 	line := streamReceive(t, h.logs.lines, "concurrent recovery log")
-	if second.err != nil || h.calls.Load() != 4 || !strings.Contains(line, "scope_cache=scope_reused") {
+	if second.err != nil || h.calls.Load() != 4 || !strings.Contains(line, "scope_cache=scope_extended") {
 		t.Fatalf("concurrent recovery: %+v calls=%d log=%s", second, h.calls.Load(), line)
 	}
 	checked := false
 	for i := 0; i < 4; i++ {
 		observed := streamReceive(t, seen, "concurrent upstream attempt")
 		if observed.header.Get("X-Scenario") == "longer" && !sessionHasID(t, observed.body, "m1") {
-			sessionAssertWindow(t, observed.body, false, true)
+			sessionAssertWindow(t, observed.body, false, false)
 			checked = true
 		}
 	}
 	if !checked {
-		t.Fatal("longer request never replayed the winning repair scope")
+		t.Fatal("longer request never repaired its own snapshot")
 	}
 }

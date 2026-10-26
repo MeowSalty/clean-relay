@@ -138,6 +138,7 @@ type sessionLog struct {
 	revision         uint64
 	preIDs           int
 	preReasoning     int
+	addedSelectors   int
 	appliedSelectors int
 	writeConfirmed   bool
 }
@@ -203,7 +204,6 @@ func scopeActions(snapshot cleaner.HistorySnapshot, view recoverySnapshot, mode 
 	anyMatch := false
 	for i, selector := range selectors {
 		item := view.scope.items[i]
-		desired[i] = item.applied
 		if matched[i] {
 			anyMatch = true
 			if item.applied || allowsHistoryAction(mode, selector.Action) {
@@ -216,15 +216,13 @@ func scopeActions(snapshot cleaner.HistorySnapshot, view recoverySnapshot, mode 
 	return actions, desired, anyMatch, unaligned
 }
 
-func (s *sessionRequest) analysis(includeApplied bool) cleaner.HistoryAnalysis {
-	selectors := scopeSelectors(s.view)
-	_, matched, _ := s.snapshot.Match(selectors)
+func (s *sessionRequest) analysis() cleaner.HistoryAnalysis {
+	actions, _, _ := s.snapshot.Match(scopeSelectors(s.view))
 	var analysis cleaner.HistoryAnalysis
-	for i, item := range s.view.scope.items {
-		if !matched[i] || !includeApplied && item.applied {
-			continue
-		}
-		switch item.selector.Action {
+	// Count input items, not deduplicated selectors: one stable selector can
+	// match multiple identical items in the same request.
+	for _, action := range actions {
+		switch action {
 		case cleaner.RemoveHistoryID:
 			analysis.PortableItemIDs++
 		case cleaner.RemoveHistoryReasoning:
@@ -277,9 +275,9 @@ func (h *Handler) prepareSession(r *http.Request, state *requestState, plain []b
 	}
 	state.sessionLog.preIDs, state.sessionLog.preReasoning = prepared.RemovedItemIDs, prepared.RemovedReasoningItems
 	analysis := snapshot.Analysis
-	if view.scope != nil && !view.scope.accepted {
-		analysis = session.analysis(false)
-	}
+	analysis.PortableItemIDs -= prepared.RemovedItemIDs
+	analysis.ReasoningItems -= prepared.RemovedReasoningItems
+	analysis.Candidate = analysis.PortableItemIDs+analysis.ReasoningItems > 0
 	plan := historyPlan(h.retryConfig.CleanupMode, analysis)
 	if len(plan) != 0 {
 		state.candidate = &retryRequest{body: plain, plan: plan, sse: sse}
@@ -295,10 +293,12 @@ func (s *sessionRequest) freeze(state *requestState, mode string) []cleaner.Hist
 		return nil
 	}
 	s.frozen = true
-	view, reason := s.manager.store.freeze(s.key, s.initial, s.snapshot.Selectors())
+	view, reason, added := s.manager.store.freeze(s.key, s.initial, s.snapshot.Selectors())
 	state.sessionLog.cache = reason
+	state.sessionLog.addedSelectors = added
 	s.view = view
 	if view.scope == nil {
+		state.retry.stop(reason)
 		return nil
 	}
 	state.sessionLog.generation, state.sessionLog.revision = view.scope.generation, view.scope.revision
@@ -309,7 +309,7 @@ func (s *sessionRequest) freeze(state *requestState, mode string) []cleaner.Hist
 	// A concurrent request may have published actions after our first send.
 	// Include them here; the transport compares against this request's last
 	// actually sent removal counts before consuming another upstream call.
-	return historyPlan(mode, s.analysis(true))
+	return historyPlan(mode, s.analysis())
 }
 
 func (s *sessionRequest) repair(body []byte, mode cleaner.HistoryMode) (cleaner.HistoryResult, bool, error) {
@@ -330,7 +330,8 @@ func (s *sessionRequest) outgoing(request *http.Request) *http.Request {
 	if s.view.scope == nil {
 		return request
 	}
-	view, desired := s.view, s.desired
+	view, manager, key := s.view, s.manager, s.key
+	desired := append([]bool(nil), s.desired...)
 	proof := &sendProof{}
 	s.proof = proof
 	trace := &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
@@ -343,7 +344,7 @@ func (s *sessionRequest) outgoing(request *http.Request) *http.Request {
 			return
 		}
 		proof.written = true
-		proof.view, proof.exact = s.manager.store.sent(s.key, view, desired)
+		proof.view, proof.exact = manager.store.sent(key, view, desired)
 	}}
 	return request.Clone(httptrace.WithClientTrace(request.Context(), trace))
 }

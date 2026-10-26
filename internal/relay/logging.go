@@ -79,7 +79,9 @@ func (h *Handler) logRequest(r *http.Request, state *requestState, status int) {
 			attrs = append(attrs, slog.Group(name,
 				"cleanup_mode", string(attempt.mode), "trigger_status", attempt.triggerStatus,
 				"error_source", attempt.source, "removed_item_ids", attempt.removedIDs,
-				"removed_reasoning_items", attempt.removedReasoning))
+				"removed_reasoning_items", attempt.removedReasoning,
+				"new_removed_item_ids", attempt.newRemovedIDs,
+				"new_removed_reasoning_items", attempt.newRemovedReasoning))
 		}
 	}
 	if state.retry.businessFailure {
@@ -93,6 +95,7 @@ func (h *Handler) logRequest(r *http.Request, state *requestState, status int) {
 			"scope_generation", state.sessionLog.generation, "scope_revision", state.sessionLog.revision,
 			"scope_pre_removed_item_ids", state.sessionLog.preIDs,
 			"scope_pre_removed_reasoning_items", state.sessionLog.preReasoning,
+			"scope_added_selectors", state.sessionLog.addedSelectors,
 			"scope_applied_selectors", state.sessionLog.appliedSelectors,
 			"scope_write_confirmed", state.sessionLog.writeConfirmed,
 			"recovery_acceptance", state.sessionLog.acceptance)
