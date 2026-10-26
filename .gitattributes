@@ -1,0 +1,5 @@
+# Go 工具链（gofmt 等）固定使用 LF，跨平台检出保持一致。
+*.go  text eol=lf
+
+# Windows 原生文本保留 CRLF。
+*.ps1 text eol=crlf
