@@ -33,5 +33,3 @@ go.work
 
 # Local design & implementation notes, kept out of the release
 /design
-
-gitignore
