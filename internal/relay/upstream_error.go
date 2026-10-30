@@ -96,10 +96,14 @@ func (e upstreamError) allowed(requireType bool) bool {
 		(e.code == "" || e.code == "invalid_request_error")
 }
 
+// The brand word between "different" and "openai resource" is not required:
+// intermediaries redact it (observed "created under a different *** OpenAI
+// resource"), so only the stable sentence fragments may match.
 func (e upstreamError) matches(requireType bool) bool {
 	message := normalizeErrorMessage(e.message)
 	return e.allowed(requireType) && e.hasMessage &&
-		strings.Contains(message, "created under a different azure openai resource") &&
+		strings.Contains(message, "created under a different") &&
+		strings.Contains(message, "openai resource") &&
 		strings.Contains(message, "use the same resource")
 }
 

@@ -8,6 +8,8 @@ import (
 
 const mismatchMessage = "Item 'synthetic-resource-id' was created under a different Azure OpenAI resource. Please use the same resource."
 
+const mismatchRedactedMessage = "OpenAI Responses bad request: The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it."
+
 func mismatchJSON() string {
 	return `{"error":{"type":"invalid_request_error","message":` + strconv.Quote(mismatchMessage) + `}}`
 }
@@ -23,8 +25,11 @@ func TestHTTPResourceErrorMatching(t *testing.T) {
 		{"code empty", `{"error":{"type":"invalid_request_error","code":"","message":` + message + `}}`, true},
 		{"code accepted", `{"error":{"type":"invalid_request_error","code":"invalid_request_error","message":` + message + `}}`, true},
 		{"ascii case and whitespace", `{"error":{"type":"invalid_request_error","message":"CREATED\n UNDER\tA DIFFERENT AZURE OPENAI RESOURCE; USE   THE SAME RESOURCE"}}`, true},
+		{"redacted brand", `{"error":{"type":"invalid_request_error","message":` + strconv.Quote(mismatchRedactedMessage) + `}}`, true},
 		{"ordinary error", `{"error":{"type":"invalid_request_error","message":"Azure OpenAI rejected this request"}}`, false},
 		{"one fragment", `{"error":{"type":"invalid_request_error","message":"created under a different Azure OpenAI resource"}}`, false},
+		{"wrong subject", `{"error":{"type":"invalid_request_error","message":"The deployment was created under a different region. Use the same resource group."}}`, false},
+		{"no openai resource", `{"error":{"type":"invalid_request_error","message":"The item was created under a different subscription. Use the same resource that created it."}}`, false},
 		{"wrong code", `{"error":{"type":"invalid_request_error","code":"invalid_encrypted_content","message":` + message + `}}`, false},
 		{"code object", `{"error":{"type":"invalid_request_error","code":{},"message":` + message + `}}`, false},
 		{"code number", `{"error":{"type":"invalid_request_error","code":1,"message":` + message + `}}`, false},
@@ -60,6 +65,7 @@ func TestSSEResourceErrorEnvelopes(t *testing.T) {
 		match             bool
 	}{
 		{"root error", "error", `{"type":"error","message":` + message + `}`, true},
+		{"redacted brand", "error", `{"type":"error","message":` + strconv.Quote(mismatchRedactedMessage) + `}`, true},
 		{"inner error type absent", "error", `{"error":{"message":` + message + `}}`, true},
 		{"inner error type", "error", `{"type":"error","error":{"type":"invalid_request_error","message":` + message + `}}`, true},
 		{"event inferred", "", `{"type":"error","message":` + message + `}`, true},
